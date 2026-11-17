@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Geek AI Usage Dashboard
-Monitors Kiro CLI and Claude Code usage quotas and statistics.
+Monitors Kiro CLI, Claude Code, and AGY usage quotas and statistics.
 """
 
 import argparse
@@ -23,7 +23,7 @@ from rich import box
 
 console = Console()
 
-def run_command(cmd, timeout=15):
+def run_command(cmd, timeout=20):
     """Run a shell command and return stdout or stderr."""
     try:
         proc = subprocess.run(
@@ -36,7 +36,7 @@ def run_command(cmd, timeout=15):
         )
         return proc.returncode, proc.stdout.strip()
     except subprocess.TimeoutExpired:
-        return 1, "Command timed out after {}s".format(timeout)
+        return 1, f"Command timed out after {timeout}s"
     except Exception as e:
         return 1, str(e)
 
@@ -105,7 +105,6 @@ def parse_claude(output):
         if not line_clean:
             continue
 
-        # Current session: 73% used · resets Nov 11, 1pm (Asia/Seoul)
         if "Current session:" in line_clean:
             m = re.search(r"Current session:\s*([0-9.]+)%\s*used\s*·\s*resets\s*(.*)", line_clean)
             if m:
@@ -143,13 +142,47 @@ def parse_claude(output):
     return data
 
 
-def make_gauge_bar(percent, width=24):
+def parse_agy(output):
+    """
+    Parses agy -p "/usage" output:
+    Quota:
+    Gemini Models          Weekly Limit Remaining     98%   2026-11-16 08:25 KST
+    Gemini Models          Five Hour Limit Remaining  98%   2026-11-11 14:32 KST
+    Claude and GPT models  Weekly Limit Remaining     100%  2026-11-18 09:37 KST
+    Claude and GPT models  Five Hour Limit Remaining  100%  2026-11-11 14:37 KST
+    """
+    items = []
+    for line in output.splitlines():
+        line_clean = line.strip()
+        m = re.search(r"^(.*?)\s+((?:Weekly|Five Hour|Daily|Monthly|Session)[^0-9%]+?)\s+(\d+)%\s+(.*)$", line_clean)
+        if m:
+            model_grp = m.group(1).strip()
+            limit_type = m.group(2).strip()
+            rem_pct = float(m.group(3))
+            reset_ts = m.group(4).strip()
+            
+            # Clean up limit label
+            limit_label = limit_type.replace("Limit Remaining", "").replace("Limit", "").strip()
+            label = f"{model_grp} ({limit_label})"
+            
+            used_pct = max(0.0, min(100.0, 100.0 - rem_pct))
+            items.append({
+                "label": label,
+                "model_group": model_grp,
+                "limit_type": limit_label,
+                "remaining_pct": rem_pct,
+                "used_pct": used_pct,
+                "reset": reset_ts
+            })
+    return {"items": items, "raw": output}
+
+
+def make_gauge_bar(percent, width=22):
     """Return a styled color-coded gauge bar string."""
     percent = max(0.0, min(100.0, percent))
     filled_len = int(round((percent / 100.0) * width))
     empty_len = width - filled_len
     
-    # Choose color based on usage percentage
     if percent >= 85:
         color = "bold red"
         bar_char = "█"
@@ -168,20 +201,24 @@ def make_gauge_bar(percent, width=24):
 
 
 def fetch_all_usages():
-    """Fetch usage from kiro and claude concurrently."""
+    """Fetch usage from kiro, claude, and agy concurrently."""
     kiro_cmd = 'kiro-cli chat --no-interactive "/usage"'
     claude_cmd = 'claude -p "/usage"'
+    agy_cmd = 'agy -p "/usage"'
     
     results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         future_kiro = executor.submit(run_command, kiro_cmd)
         future_claude = executor.submit(run_command, claude_cmd)
+        future_agy = executor.submit(run_command, agy_cmd)
         
         _, kiro_out = future_kiro.result()
         _, claude_out = future_claude.result()
+        _, agy_out = future_agy.result()
         
         results["kiro"] = parse_kiro(kiro_out)
         results["claude"] = parse_claude(claude_out)
+        results["agy"] = parse_agy(agy_out)
         
     return results
 
@@ -191,13 +228,14 @@ def render_dashboard(results):
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     kiro = results["kiro"]
     claude = results["claude"]
+    agy = results["agy"]
 
     # Top Header
     header_table = Table.grid(expand=True)
     header_table.add_column(justify="left", ratio=3)
     header_table.add_column(justify="right", ratio=2)
     header_table.add_row(
-        Text("⚡ SYSTEM USAGE MONITOR // NEURAL QUOTAS", style="bold cyan"),
+        Text("⚡ USAGE MONITOR // QUOTAS", style="bold cyan"),
         Text(f"REFRESH: {now_str} ", style="dim green")
     )
     header_panel = Panel(
@@ -216,7 +254,7 @@ def render_dashboard(results):
     credits_left = max(0.0, kiro["credits_total"] - kiro["credits_used"])
     
     kiro_table.add_row("Plan Tier", f"[bold magenta]{kiro['plan']}[/bold magenta]")
-    kiro_table.add_row("Usage Quota", f"{k_bar}  [{k_color}]{kiro['percentage']:.1f}%[/{k_color}]")
+    kiro_table.add_row("Usage Quota", f"{k_bar}  [{k_color}]{kiro['percentage']:.1f}%[/{k_color}] used")
     kiro_table.add_row(
         "Credits Used",
         f"[bold white]{kiro['credits_used']:,.2f}[/bold white] / [dim]{kiro['credits_total']:,.2f}[/dim] (Left: [green]{credits_left:,.2f}[/green])"
@@ -230,7 +268,7 @@ def render_dashboard(results):
         title="[bold blue]󰚩 KIRO-CLI MONITOR[/bold blue]",
         border_style="blue",
         box=box.ROUNDED,
-        padding=(1, 1)
+        padding=(0, 1)
     )
 
     # 2. Claude Panel
@@ -244,15 +282,15 @@ def render_dashboard(results):
 
     claude_table.add_row(
         "Session Usage",
-        f"{s_bar}  [{s_color}]{claude['session_pct']:.0f}%[/{s_color}] [dim](resets {claude['session_reset']})[/dim]"
+        f"{s_bar}  [{s_color}]{claude['session_pct']:.0f}%[/{s_color}] used [dim](resets {claude['session_reset']})[/dim]"
     )
     claude_table.add_row(
         "Week (All Models)",
-        f"{w_bar}  [{w_color}]{claude['week_all_pct']:.0f}%[/{w_color}] [dim](resets {claude['week_all_reset']})[/dim]"
+        f"{w_bar}  [{w_color}]{claude['week_all_pct']:.0f}%[/{w_color}] used [dim](resets {claude['week_all_reset']})[/dim]"
     )
     claude_table.add_row(
         "Week (Fable)",
-        f"{f_bar}  [{f_color}]{claude['week_fable_pct']:.0f}%[/{f_color}] [dim](resets {claude['week_fable_reset']})[/dim]"
+        f"{f_bar}  [{f_color}]{claude['week_fable_pct']:.0f}%[/{f_color}] used [dim](resets {claude['week_fable_reset']})[/dim]"
     )
 
     claude_panel = Panel(
@@ -260,16 +298,38 @@ def render_dashboard(results):
         title="[bold yellow]󰘑 CLAUDE CODE MONITOR[/bold yellow]",
         border_style="bright_yellow",
         box=box.ROUNDED,
-        padding=(1, 1)
+        padding=(0, 1)
     )
 
-    # 3. Cost & Activity Driver Analytics Panel
+    # 3. AGY Panel
+    agy_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+    agy_table.add_column(style="bold white", ratio=4)
+    agy_table.add_column(style="white", ratio=6)
+
+    if agy["items"]:
+        for item in agy["items"]:
+            a_bar, a_color = make_gauge_bar(item["used_pct"], width=22)
+            agy_table.add_row(
+                item["label"],
+                f"{a_bar}  [{a_color}]{item['used_pct']:.0f}%[/{a_color}] used [dim]({item['remaining_pct']:.0f}% left · resets {item['reset']})[/dim]"
+            )
+    else:
+        agy_table.add_row("Status", "[dim italic]No AGY quota data returned[/dim italic]")
+
+    agy_panel = Panel(
+        agy_table,
+        title="[bold magenta]󰑣 ANTIGRAVITY MONITOR[/bold magenta]",
+        border_style="magenta",
+        box=box.ROUNDED,
+        padding=(0, 1)
+    )
+
+    # 4. Cost & Activity Driver Analytics Panel
     insights_table = Table(box=None, expand=True, padding=(0, 1))
     insights_table.add_column("Window", style="bold cyan", width=12)
     insights_table.add_column("Traffic", style="bold white", width=22)
     insights_table.add_column("Top Consumption Drivers", style="dim white")
 
-    # Format 24h top drivers
     top_24h_str = " • ".join(claude["h24_top"][:3]) if claude["h24_top"] else "[dim]No activity recorded[/dim]"
     insights_table.add_row(
         "Last 24h",
@@ -277,7 +337,6 @@ def render_dashboard(results):
         top_24h_str
     )
 
-    # Format 7d top drivers
     top_7d_str = " • ".join(claude["d7_top"][:3]) if claude["d7_top"] else "[dim]No activity recorded[/dim]"
     insights_table.add_row(
         "Last 7d",
@@ -300,6 +359,7 @@ def render_dashboard(results):
     main_grid.add_row(header_panel)
     main_grid.add_row(kiro_panel)
     main_grid.add_row(claude_panel)
+    main_grid.add_row(agy_panel)
     main_grid.add_row(insights_panel)
     main_grid.add_row(footer)
 
@@ -307,10 +367,10 @@ def render_dashboard(results):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Geek AI Usage Dashboard (Kiro + Claude)")
+    parser = argparse.ArgumentParser(description="Geek AI Usage Dashboard (Kiro + Claude + AGY)")
     parser.add_argument("-w", "--watch", type=int, nargs="?", const=60, default=None,
                         help="Watch mode: continuously refresh every N seconds (default: 60)")
-    parser.add_argument("--raw", action="store_true", help="Print raw outputs from both CLIs")
+    parser.add_argument("--raw", action="store_true", help="Print raw outputs from all CLIs")
     args = parser.parse_args()
 
     if args.raw:
@@ -320,10 +380,13 @@ def main():
         print("\n=== CLAUDE USAGE ===")
         _, c_out = run_command('claude -p "/usage"')
         print(c_out)
+        print("\n=== AGY USAGE ===")
+        _, a_out = run_command('agy -p "/usage"')
+        print(a_out)
         return
 
     if args.watch is None:
-        with console.status("[bold cyan]Querying neural gateways (kiro & claude)...[/bold cyan]", spinner="dots12"):
+        with console.status("[bold cyan]Querying neural gateways (kiro, claude, agy)...[/bold cyan]", spinner="dots12"):
             results = fetch_all_usages()
         console.print(render_dashboard(results))
     else:

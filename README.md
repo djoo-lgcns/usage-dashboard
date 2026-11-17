@@ -1,9 +1,12 @@
 # AI Usage Geek Dashboard ⚡
 
-A high-tech terminal dashboard monitoring your **Kiro CLI** and **Claude Code** usage quotas, credits, reset schedules, and activity analytics concurrently in real-time.
+A high-tech terminal dashboard monitoring your **Kiro CLI**, **Claude Code**, and **AGY (Antigravity)** usage quotas, credits, reset schedules, and activity analytics concurrently in real-time.
 
 ## Features
-- **Parallel Querying**: Fetches `kiro-cli chat --no-interactive "/usage"` and `claude -p "/usage"` concurrently in background threads.
+- **3-Way Parallel Querying**: Concurrently queries:
+  - `kiro-cli chat --no-interactive "/usage"`
+  - `claude -p "/usage"`
+  - `agy -p "/usage"`
 - **Cyberpunk Terminal Aesthetic**: Rich color-coded gauge bars (`████░░░░`), formatted quota meters, and clean unicode card layouts.
 - **Consumption Analytics**: Displays top contributors and request/session metrics for 24-hour and 7-day windows.
 - **Live Watch Mode**: Continuously refreshes the dashboard without flickering.
