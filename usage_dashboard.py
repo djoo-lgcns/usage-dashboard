@@ -650,7 +650,7 @@ def main():
 
     # Snapshot or watch mode
     if args.watch is None:
-        with console.status("[bold cyan]Discovering tools & querying neural gateways...[/bold cyan]", spinner="dots12"):
+        with console.status("[bold cyan]Querying active usages in parallel...[/bold cyan]", spinner="dots12"):
             results = fetch_usages(selected_tools=selected, force_all=args.all)
         console.print(render_dashboard(results))
     else:
